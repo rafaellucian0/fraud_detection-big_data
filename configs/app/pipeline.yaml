@@ -1,0 +1,22 @@
+kafka:
+  bootstrap_servers: kafka:9092
+  raw_topic: transactions.raw
+  scored_topic: transactions.scored
+  alerts_topic: fraud.alerts
+iceberg:
+  catalog: local
+  warehouse: hdfs://hadoop-namenode:8020/lakehouse/warehouse
+  hive_metastore_uri: thrift://hive-metastore:9083
+hdfs:
+  namenode: hdfs://hadoop-namenode:8020
+  checkpoints: hdfs://hadoop-namenode:8020/lakehouse/checkpoints
+  models: hdfs://hadoop-namenode:8020/lakehouse/models
+tables:
+  bronze_raw: local.bronze.transactions_raw
+  silver_clean: local.silver.transactions_clean
+  silver_features: local.silver.transactions_features
+  gold_scores: local.gold.fraud_scores
+  gold_alerts: local.gold.fraud_alerts
+  gold_kpis_hourly: local.gold.fraud_kpis_hourly
+  gold_kpis_daily: local.gold.fraud_kpis_daily
+

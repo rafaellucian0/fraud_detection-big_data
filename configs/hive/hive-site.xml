@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<configuration>
+  <property>
+    <name>metastore.thrift.uris</name>
+    <value>thrift://hive-metastore:9083</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionURL</name>
+    <value>jdbc:postgresql://hive-metastore-db:5432/metastore</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionDriverName</name>
+    <value>org.postgresql.Driver</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionUserName</name>
+    <value>hive</value>
+  </property>
+  <property>
+    <name>javax.jdo.option.ConnectionPassword</name>
+    <value>hive</value>
+  </property>
+  <property>
+    <name>metastore.warehouse.dir</name>
+    <value>hdfs://hadoop-namenode:8020/lakehouse/warehouse</value>
+  </property>
+</configuration>
+

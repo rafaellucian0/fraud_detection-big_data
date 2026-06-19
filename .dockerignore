@@ -1,0 +1,15 @@
+.git
+.venv
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.pyc
+data/input/creditcard.csv
+data/output/**
+models/**
+!models/.gitkeep
+airflow/logs
+airflow/plugins
+airflow/config
+

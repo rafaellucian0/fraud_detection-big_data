@@ -1,0 +1,17 @@
+policy: max_recall_with_precision_floor
+min_precision: 0.70
+thresholds:
+  - 0.10
+  - 0.15
+  - 0.20
+  - 0.25
+  - 0.30
+  - 0.35
+  - 0.40
+  - 0.45
+  - 0.50
+  - 0.60
+  - 0.70
+  - 0.80
+  - 0.90
+
