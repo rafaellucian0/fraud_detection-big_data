@@ -1,0 +1,285 @@
+% Fonte LaTeX do artigo. Substitua o preambulo pelo template SBC quando necessario.
+\documentclass[10pt,twocolumn]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[brazil]{babel}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage[margin=2cm]{geometry}
+\title{Deteccao de Fraudes em Cartoes com Lakehouse Local, Apache Spark e Avaliacao Temporal Reprodutivel}
+\author{Rafael Luciano}
+\date{Junho de 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+A deteccao de fraude em pagamentos combina uma classe positiva rara, custos assimetricos de erro e necessidade de resposta rapida. Este trabalho apresenta e avalia uma arquitetura lakehouse local para o problema, integrando Kafka, Apache Spark Structured Streaming, HDFS, Apache Iceberg, Hive Metastore, Airflow e Spark MLlib. O experimento usa as 284.807 transacoes do conjunto ULB e separa cronologicamente treino, validacao e teste em 60/20/20. Dois ensembles Random Forest--Gradient-Boosted Trees ponderados por classe sao comparados em cinco sementes; a selecao usa somente PR-AUC de validacao e o teste permanece isolado. O candidato selecionado alcancou, no bloco de teste, PR-AUC de $0{,}749825 \pm 0{,}016599$, ROC-AUC de $0{,}978700 \pm 0{,}004384$, precision de $0{,}861579 \pm 0{,}025262$ e recall de $0{,}735135 \pm 0{,}015408$. A materializacao operacional produziu 284.807 scores e 562 alertas. Alem de resultados preditivos, o estudo mostra como uma camada de tabelas transacionais e um catalogo compartilhado sustentam rastreabilidade, reprocessamento e analise de qualidade.
+\end{abstract}
+
+\textbf{Palavras-chave:} deteccao de fraude; lakehouse; Apache Spark; streaming; Apache Iceberg; avaliacao temporal; dados desbalanceados.
+
+\section{Introduction}
+
+Pagamentos digitais tornaram a analise antifraude uma tarefa simultaneamente estatistica e operacional. A decisao precisa ocorrer no intervalo entre a chegada do evento e sua autorizacao, mas o resultado verdadeiro da transacao normalmente so e conhecido depois. Alem disso, uma pequena fracao dos registros representa fraude. Uma acuracia elevada, portanto, pode ser obtida por um classificador inutil que chama todos os eventos de legitimos. A consequencia pratica e dupla: falsos negativos expoem a instituicao a perdas; falsos positivos interrompem clientes legitimos e aumentam o custo de revisao humana.
+
+A literatura de fraude enfatiza que a modelagem deve considerar desbalanceamento, mudanca temporal e custos de decisao, em vez de tratar a classificacao binaria como um problema i.i.d. comum \cite{ngai2011,dalpozzolo2015,dalpozzolo2018}. Em particular, um teste cronologicamente posterior e mais proximo do uso operacional do que uma particao aleatoria: ele reduz a possibilidade de registros de um mesmo periodo aparecerem nos dois lados da avaliacao e oferece uma visao mais honesta da generalizacao ao futuro. Essa preocupacao e especialmente relevante quando as variaveis descrevem padroes transacionais, pois comportamento fraudulento e comportamento legitimo podem evoluir.
+
+Ao lado do modelo, a infraestrutura precisa preservar o caminho do dado. Uma solucao que recebe eventos em streaming, treina em lote e depois produz indicadores analiticos tende a acumular sistemas separados, copias de dados e regras dificeis de auditar. O conceito de lakehouse procura combinar armazenamento aberto de um data lake com controle de metadados, confiabilidade de tabelas e desempenho analitico tradicionalmente associados ao data warehouse \cite{armbrust2021}. Essa convergencia e adequada a fraude: os mesmos dados podem sustentar ingestao, preparacao, treinamento, inferencia, alertas e consultas retrospectivas.
+
+Este artigo apresenta uma implementacao local, deliberadamente reprodutivel, de um lakehouse para deteccao de fraude. A contribuicao principal nao e propor um novo algoritmo, mas estabelecer uma pipeline experimental completa e auditavel com ferramentas abertas. O trabalho: (i) organiza eventos ULB em camadas Bronze, Silver e Gold sobre Iceberg/HDFS; (ii) realiza inferencia apos Silver e antes de Gold, preservando a ordem operacional; (iii) define um protocolo temporal de treino, validacao, teste e cinco repeticoes; e (iv) reporta metricas de classificacao, matrizes de confusao, scores, alertas, qualidade e tempos de execucao. Trabalhos recentes sobre lakehouse para risco de pagamentos reforcam a utilidade de combinar processamento de eventos e analise em lote, embora frequentemente descrevam arquiteturas em nivel conceitual \cite{battapothu2025,carrington2025,adlermann2024}. Aqui, cada resultado apresentado foi materializado no ambiente executado.
+
+\section{Description} \label{sec:firstpage}
+
+\subsection{Deteccao de fraude e avaliacao desbalanceada}
+
+Em deteccao de fraude, a classe positiva e rara e os erros nao tem o mesmo significado. Seja $TP$ o numero de fraudes corretamente sinalizadas, $FP$ os alertas incorretos, $TN$ as transacoes legitimas aceitas e $FN$ as fraudes nao sinalizadas. A precision e $TP/(TP+FP)$, o recall e $TP/(TP+FN)$, enquanto o F1 harmoniza os dois criterios. Essas medidas devem ser lidas em conjunto: aumentar a sensibilidade reduzindo o limiar pode elevar fortemente os falsos positivos; tornar o limiar muito alto pode reduzir a fila de revisao, mas deixar fraudes passar.
+
+A curva ROC e seu AUC continuam uteis para resumir ordenacao de scores, mas podem parecer excessivamente favoraveis quando negativos dominam a populacao. A curva precision--recall (PR) concentra a analise na classe de interesse e e recomendada para conjuntos desbalanceados \cite{davis2006,saito2015}. Por isso, este estudo declara PR-AUC como metrica primaria para escolher hiperparametros. ROC-AUC, precision, recall, F1 e a matriz de confusao sao reportados como medidas complementares. A acuracia nao e utilizada para selecao.
+
+Outra decisao fundamental e a separacao dos dados. Validacao cruzada estratificada e comum em problemas estaticos, mas pode subestimar o erro quando ha dependencia temporal. Estudos de fraude recomendam distinguir o periodo de treinamento do periodo futuro de avaliacao e tornar explicita a estrategia de atualizacao \cite{dalpozzolo2018}. O protocolo deste trabalho usa tres blocos cronologicos e nao permite que o teste influencie a escolha de algoritmo, limiar ou pesos.
+
+\subsection{Lakehouse e tabelas transacionais abertas}
+
+O lakehouse emprega armazenamento de arquivos aberto, mas adiciona um catalogo e operacoes de tabela para oferecer consistencia a workloads de engenharia e analise. Iceberg materializa esse papel no experimento: cada camada e uma tabela catalogada pelo Hive Metastore e mantida no HDFS. O catalogo fornece um nome estavel para leitura por Spark, enquanto snapshots e metadados permitem evolucao e inspeccao das tabelas. Dessa forma, a camada Bronze nao e apenas um diretorio bruto, e Gold nao e apenas uma exportacao CSV sem linhagem.
+
+As camadas seguem a convencao medallion. Bronze retém evento, topico, particao, offset, instante de ingestao e identificador tecnico. Silver aplica tipos, remove registros invalidos, cria a label e disponibiliza as features do modelo. Gold recebe scores, alertas, KPIs, metricas de qualidade e resultados experimentais. A separacao torna visivel onde um resultado foi produzido e permite reprocessar Silver ou Gold sem republicar o arquivo de origem. A visao e compativel com arquiteturas multi-tier discutidas para dominios financeiros regulados \cite{bfsilakehouse2023,allam2024}.
+
+\subsection{Processamento distribuido, eventos e orquestracao}
+
+Apache Spark e um motor unificado para processamento em memoria, SQL, streaming estruturado e aprendizado de maquina \cite{zaharia2016}. No projeto, o mesmo ecossistema executa a limpeza batch, o treinamento MLlib, a leitura Structured Streaming de Kafka, a gravacao Iceberg e as agregacoes Gold. Isso reduz a troca de formatos entre etapas e permite reutilizar o catalogo e as mesmas definicoes de schema.
+
+Kafka e o barramento de eventos. O produtor publica uma transacao ULB por mensagem JSON em \texttt{transactions.raw}; o streaming Bronze a le a partir do inicio e persiste offsets no checkpoint HDFS. Kafka foi concebido como sistema de mensagens distribuido para processamento de logs, com retencao e alto throughput \cite{kreps2011}. Structured Streaming oferece o modelo de micro-batches e checkpoint para que a transformacao seja expressa como consulta incremental, aproximando processamento de eventos e processamento historico \cite{akidau2015}.
+
+Airflow tem papel de orquestrador: suas DAGs disparam os jobs de inicializacao, ingestao, Silver, treinamento, agregacao e qualidade. Ele nao controla um loop continuo de consumo Kafka; os streams pertencem ao Spark. Essa separacao evita usar um agendador batch como mecanismo de streaming e preserva a responsabilidade de cada componente. Artigos aplicados recentes tambem relacionam orquestracao e camadas analiticas a rastreabilidade em ambientes financeiros \cite{bfsilakehouse2023}.
+
+\section{Methodology}
+
+\subsection{Visao geral da arquitetura}
+
+A arquitetura foi implementada inteiramente em contêineres Docker Compose. Os servicos sao Kafka e ZooKeeper, HDFS NameNode/DataNode, Hive Metastore com PostgreSQL, Spark Master e Worker, Airflow com PostgreSQL e Kafka UI. O armazenamento principal e HDFS; Iceberg usa Hive Catalog no endereco do metastore. As versoes sao fixadas no repositório: Spark 3.5.1, Iceberg 1.5.2, Kafka Confluent 7.6.1, Hadoop 3.2.1, Hive Metastore 3.1.3 e Airflow 2.9.2.
+
+\begin{center}
+\fbox{\parbox{0.92\columnwidth}{\centering \textbf{[Figura 1 -- inserir manualmente]}\\ Diagrama da arquitetura: CSV ULB $\rightarrow$ produtor $\rightarrow$ Kafka $\rightarrow$ Bronze/Iceberg-HDFS $\rightarrow$ Silver $\rightarrow$ treinamento MLlib $\rightarrow$ scoring streaming ou batch $\rightarrow$ Gold, Power BI e Airflow.}}
+\end{center}
+
+O desenho atende a dois caminhos. O caminho online recebe e persiste eventos, enquanto o caminho analitico produz modelos, analisa resultados e prepara indicadores. O score e calculado depois da Silver, pois somente ali as features tem schema e tipos controlados; ele ocorre antes da Gold, pois Gold armazena o produto da decisao, e nao a etapa de decisao. Essa ordem tambem permite que alertas e scores sejam publicados no Kafka sem aguardar agregacoes diarias.
+
+\subsection{Ingestao e camada Bronze}
+
+O arquivo \texttt{creditcard.csv} e validado antes da publicacao. O produtor verifica a presenca de \texttt{Time}, \texttt{V1} a \texttt{V28}, \texttt{Amount} e \texttt{Class}; cada linha recebe um identificador deterministico e e enviada a Kafka. Na execucao, foram usados lotes de 5.000 mensagens. O produtor publicou 284.807 eventos em 164,6 s, distribuidos em tres particoes do topico. O checkpoint Bronze confirmou os offsets finais 95.515, 95.267 e 94.025, cuja soma e o numero total de eventos.
+
+O job \texttt{kafka\_to\_bronze.py} le JSON, preserva o offset Kafka e grava em \texttt{local.bronze.transactions\_raw}. A combinacao de \texttt{transaction\_id} e offset cria \texttt{raw\_event\_id}, permitindo distinguir replay tecnico de identidade de negocio. O checkpoint fica no HDFS; assim, uma reinicializacao do stream continua a partir do ponto processado. Essa etapa foi mantida mesmo para o conjunto historico porque o objetivo experimental inclui validar a rota de ingestao que seria usada para dados em producao.
+
+\subsection{Silver: qualidade, schema e features}
+
+Silver e gerada pelo job \texttt{bronze\_to\_silver.py}. Todas as variaveis do dataset sao convertidas explicitamente para \texttt{double}; a classe e disponibilizada como \texttt{label}; valores nulos das features sao preenchidos com zero e labels fora de $\{0,1\}$ sao excluidos. A tabela \texttt{local.silver.transactions\_clean} preserva metadados tecnicos e \texttt{local.silver.transactions\_features} inclui um vetor de features para consumo analitico.
+
+O desbalanceamento e tratado por pesos de classe no treinamento. Para cada classe $c$, o peso empregado e $w_c=N/(2N_c)$, em que $N$ e o numero de registros de treinamento e $N_c$ o numero de elementos da classe. Os pesos sao calculados exclusivamente no bloco de treino em cada etapa de ajuste, nao no conjunto completo. Essa estrategia preserva o conjunto original e evita introduzir sintetizacao externa, alinhando-se a uma comparacao controlada com algoritmos Spark MLlib.
+
+\subsection{Protocolo experimental e prevencao de vazamento}
+
+O protocolo foi registrado em \texttt{configs/app/experiment.yaml}. A variavel \texttt{Time} determina dois pontos de corte aproximados por quantil: 120.390 s e 145.229 s. O primeiro bloco contem 170.229 transacoes (60\%), o segundo 56.732 (20\%) e o bloco de teste 56.765 (20\%). Os tamanhos diferem levemente das proporcoes nominais porque existem eventos com o mesmo instante; a regra de fronteira preserva o ordenamento. Os blocos contem, respectivamente, 323, 95 e 74 fraudes.
+
+O experimento adota cinco sementes: 42, 52, 62, 72 e 82. Nao existe um unico numero universal de repeticoes que seja ``gold standard'' para fraude; a literatura salienta que a avaliacao deve refletir a dependencia temporal e a variabilidade do metodo \cite{dalpozzolo2018,hand2009}. Cinco repeticoes sao usadas aqui como compromisso usual de estabilidade para algoritmos estocasticos em ambiente local: permitem reportar media e desvio-padrao, sem confundir o teste com uma busca exaustiva de configuracoes. O conjunto de teste permanece fechado durante as dez execucoes de validacao.
+
+Dois candidatos foram definidos antes da execucao. O candidato \textit{compact} usa Random Forest com 80 arvores e profundidade maxima 8, mais GBT com 50 iteracoes e profundidade 3. O candidato \textit{extended} usa 120 arvores/profundidade 10 e GBT de 60 iteracoes/profundidade 4. A grade e deliberadamente pequena: arvores profundas e muitas iteracoes aumentariam custo e risco de ajuste excessivo para uma demonstracao arquitetural, enquanto duas capacidades permitem observar se maior complexidade melhora a ordenacao PR no periodo de validacao. Cada candidato e treinado cinco vezes sobre o mesmo bloco de treino.
+
+Para cada ajuste, o score do ensemble e a media simples das probabilidades de fraude de Random Forest e GBT:
+\begin{equation}
+s(x) = \frac{p_{RF}(y=1|x) + p_{GBT}(y=1|x)}{2}.
+\end{equation}
+O limiar e buscado na grade $0{,}05, 0{,}10, \ldots, 0{,}95$. A politica seleciona o maior recall com precision minima de 0,70; se nenhum limiar satisfizer o piso, usa o maior F1. A decisao de configuracao usa a media de PR-AUC na validacao, com F1 como desempate. Apenas apos a escolha sao carregados os cinco modelos vencedores e calculadas as metricas no teste. Por fim, um modelo de implantacao e ajustado sobre treino mais validacao; seu limiar e a mediana dos cinco limiares de validacao. Esse ultimo modelo materializa Gold, mas suas metricas retrospectivas nao substituem o teste isolado.
+
+\subsection{Treinamento, registro e inferencia}
+
+O treinamento usa exclusivamente \texttt{RandomForestClassifier} e \texttt{GBTClassifier} do Spark MLlib, ambos com \texttt{weightCol}. Cada modelo de validacao e salvo no HDFS em um caminho que contem identificador do experimento, candidato e semente. As tabelas \texttt{local.gold.experiment\_metrics} e \texttt{local.gold.experiment\_summary} registram seed, split, limiar, matriz de confusao, PR-AUC, ROC-AUC, media e desvio-padrao. O arquivo local \texttt{models/latest\_metadata.json} registra versao, colunas, pesos, pontos de corte e caminhos dos modelos.
+
+Para demonstrar materializacao reprodutivel, o job \texttt{score\_silver\_batch.py} aplica o modelo de implantacao a toda a Silver. O job de streaming existente aplica a mesma logica em micro-batches para novos registros. Em ambos os casos, \texttt{fraud\_score}, probabilidades individuais, limiar, versao do modelo e instante de score sao escritos em \texttt{local.gold.fraud\_scores}; previsoes positivas tambem entram em \texttt{local.gold.fraud\_alerts}. A rotina Gold gera KPIs horarios e diarios e exporta CSV para Power BI. A rotina de qualidade mede contagem, nulidade, distribuicoes e outros indicadores, gravando 151 metricas na tabela Gold.
+
+\subsection{Ambiente e verificacao}
+
+O experimento foi executado em 21 de junho de 2026 no ambiente local Docker do projeto, com um Spark Worker configurado com 2 cores e 3 GB de memoria. A execucao completa incluiu reinicializacao dos volumes para evitar mistura com a amostra exploratoria anterior, inicializacao Iceberg, criacao dos topicos, ingestao, Bronze, Silver, experimento, scoring batch, Gold e qualidade. Os testes unitarios do repositorio foram executados no container Spark e obtiveram 12 testes aprovados.
+
+Os tempos observados foram 164,6 s para publicacao Kafka, 66,7 s para Bronze--Silver, 1.224,8 s para o experimento completo de modelos, 74,0 s para scoring batch, 44,7 s para agregacoes Gold e 68,2 s para qualidade. Esses tempos nao sao benchmark de escala, pois incluem um unico worker e downloads iniciais de dependencias no primeiro job. Eles documentam, contudo, que a pipeline foi executada de ponta a ponta e oferecem uma base para comparacao de futuras configuracoes.
+
+\section{Results}
+
+\subsection{Dataset ULB e integridade da execucao}
+
+O conjunto Credit Card Fraud Detection foi disponibilizado pelo Machine Learning Group da Universite Libre de Bruxelles em parceria com Worldline \cite{ulb2013}. Ele contem transacoes de cartoes europeus realizadas durante dois dias de setembro de 2013. Das 284.807 instancias, 492 sao fraudulentas, o que corresponde a aproximadamente 0,1727\%. Por razoes de confidencialidade, as componentes \texttt{V1}--\texttt{V28} resultam de transformacao PCA; \texttt{Time} representa segundos desde a primeira transacao e \texttt{Amount} e o valor monetario. A label \texttt{Class} e usada apenas para treinamento e avaliacao offline; em uma implantacao real, o rotulo chegaria com atraso.
+
+A Tabela \ref{tab:layers} confirma a integridade basica do fluxo. Bronze, Silver e Gold de scores preservaram as 284.807 transacoes. Isso mostra que o produtor, as tres particoes Kafka, o stream Iceberg e o job Silver nao perderam ou duplicaram registros no experimento reinicializado. A tabela de alertas contem apenas a parcela classificada como suspeita; qualidade registrou 151 medidas auditaveis.
+
+\begin{table}[ht]
+\centering
+\caption{Contagens materializadas por camada.}
+\label{tab:layers}
+\begin{tabular}{lr}
+\toprule
+Artefato & Registros \\
+\midrule
+Bronze \texttt{transactions\_raw} & 284.807 \\
+Silver \texttt{transactions\_clean} & 284.807 \\
+Gold \texttt{fraud\_scores} & 284.807 \\
+Gold \texttt{fraud\_alerts} & 562 \\
+Metricas de qualidade & 151 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Selecao por validacao}
+
+A Tabela \ref{tab:validation} mostra as medias das cinco sementes. O candidato \textit{compact} foi escolhido porque sua PR-AUC media na validacao foi 0,656087, ligeiramente superior a 0,649046 do \textit{extended}. A diferenca e pequena e os desvios-padrao se sobrepoem; portanto, o resultado nao deve ser lido como evidencia de superioridade ampla da configuracao menor. Ele mostra, no entanto, que aumentar arvores, profundidade e iteracoes nao trouxe ganho consistente no criterio previamente declarado. O \textit{extended} obteve precision e F1 medias superiores nesse bloco, mas a regra de selecao manteve PR-AUC como objetivo principal para evitar trocar o criterio apos ver os resultados.
+
+\begin{table*}[t]
+\centering
+\caption{Validacao temporal: media $\pm$ desvio-padrao em cinco sementes. O vencedor foi definido por PR-AUC.}
+\label{tab:validation}
+\begin{tabular}{lrrrrrr}
+\toprule
+Candidato & PR-AUC & ROC-AUC & Precision & Recall & F1 & Limiar \\
+\midrule
+Compact & $0{,}656087\pm0{,}030716$ & $0{,}972292\pm0{,}002404$ & $0{,}797130\pm0{,}049850$ & $0{,}736842\pm0{,}021487$ & $0{,}765472\pm0{,}032498$ & $0{,}70\pm0{,}00$ \\
+Extended & $0{,}649046\pm0{,}045177$ & $0{,}959786\pm0{,}008407$ & $0{,}860991\pm0{,}063378$ & $0{,}715789\pm0{,}031383$ & $0{,}780548\pm0{,}032860$ & $0{,}58\pm0{,}027386$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+O limiar 0,70 foi selecionado em todas as cinco execucoes do candidato compacto. Isso e coerente com a politica de precision minima 0,70: no periodo de validacao, o modelo pode elevar recall ate o ponto em que a fila de alertas ainda preserva qualidade. O limiar do modelo de implantacao foi a mediana desses valores, tambem 0,70. A estabilidade do limiar nao elimina a necessidade de recalibracao futura, pois o dataset e historico e nao representa deriva de conceito em longo prazo.
+
+\begin{center}
+\fbox{\parbox{0.92\columnwidth}{\centering \textbf{[Figura 2 -- inserir manualmente]}\\ Curvas precision--recall das cinco sementes na validacao e no teste, com destaque para o candidato compacto selecionado.}}
+\end{center}
+
+\subsection{Teste cronologico isolado}
+
+O bloco de teste contem 56.765 transacoes, das quais 74 sao fraudes. A Tabela \ref{tab:test} apresenta cada repeticao do candidato selecionado. A media de PR-AUC foi 0,749825 com desvio-padrao 0,016599; ROC-AUC foi 0,978700 com desvio-padrao 0,004384. Precision media de 0,861579 significa que a maior parte dos alertas do teste correspondeu a fraude, enquanto recall medio de 0,735135 indica que cerca de tres quartos das 74 fraudes foram sinalizadas no limiar escolhido. O F1 medio foi 0,793038.
+
+\begin{table*}[t]
+\centering
+\caption{Resultados por semente no bloco temporal de teste.}
+\label{tab:test}
+\begin{tabular}{rrrrrrrrrrrr}
+\toprule
+Run & Seed & Precision & Recall & F1 & PR-AUC & ROC-AUC & TP & FP & TN & FN \\
+\midrule
+1 & 42 & 0,861538 & 0,756757 & 0,805755 & 0,749979 & 0,974861 & 56 & 9 & 56.682 & 18 \\
+2 & 52 & 0,843750 & 0,729730 & 0,782609 & 0,756951 & 0,979404 & 54 & 10 & 56.681 & 20 \\
+3 & 62 & 0,898305 & 0,716216 & 0,796992 & 0,721545 & 0,973738 & 53 & 6 & 56.685 & 21 \\
+4 & 72 & 0,870968 & 0,729730 & 0,794118 & 0,764267 & 0,981293 & 54 & 8 & 56.683 & 20 \\
+5 & 82 & 0,833333 & 0,743243 & 0,785714 & 0,756382 & 0,984204 & 55 & 11 & 56.680 & 19 \\
+\midrule
+Media & -- & 0,861579 & 0,735135 & 0,793038 & 0,749825 & 0,978700 & -- & -- & -- & -- \\
+DP & -- & 0,025262 & 0,015408 & 0,009232 & 0,016599 & 0,004384 & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Os resultados mostram baixa variacao em recall e F1, e variacao moderada em PR-AUC. Essa variacao e esperada porque ha apenas 74 positivos no teste e porque Random Forest e GBT possuem componentes estocasticos. O ponto mais baixo de PR-AUC ocorreu na semente 62, embora sua precision tenha sido a maior; novamente, uma unica metrica nao descreve todos os trade-offs. A avaliacao por repeticao e mais informativa que reportar somente o melhor run, pratica que poderia superestimar a capacidade do metodo.
+
+O teste tambem evidencia um ponto de interpretacao: PR-AUC no teste foi maior que na validacao. Isso nao deve ser tratado como melhoria causada pelo teste, mas como diferenca de dificuldade entre janelas temporais e tamanho pequeno da classe positiva. Como o teste nao participou da escolha de configuracao, ele continua valido para a estimativa deste protocolo. A diferenca reforca a importancia de executar reavaliacoes temporais sucessivas em cenarios reais.
+
+\subsection{Scores e alertas do modelo de implantacao}
+
+Depois de concluida a avaliacao, o modelo compacto de implantacao foi treinado com treino e validacao e aplicado retrospectivamente a toda a Silver. Esta etapa nao e uma nova medida de generalizacao, porque inclui registros vistos no treino; seu objetivo e demonstrar o produto operacional da pipeline. Foram persistidos 284.807 scores e 562 alertas a limiar 0,70. Dos alertas, 435 eram fraudes reais e 127 eram falsos positivos; 57 fraudes nao foram alertadas. A precision retrospectiva foi $435/562=0,7731$ e o recall retrospectivo foi $435/492=0,8841$.
+
+O recall operacional maior que o recall de teste e esperado porque o modelo de implantacao usa 80\% dos dados para treinamento e e aplicado tambem sobre esse periodo. Por essa razao, a Tabela \ref{tab:test}, e nao estes numeros retrospectivos, e a referencia cientifica para desempenho preditivo. Os scores Gold, contudo, sao valiosos para auditoria, priorizacao e BI: cada linha preserva probabilidades de RF e GBT, score final, predicao, limiar, versao do modelo e timestamp de scoring.
+
+\begin{table}[ht]
+\centering
+\caption{Materializacao operacional sobre toda a Silver. Nao e avaliacao independente.}
+\label{tab:operational}
+\begin{tabular}{lr}
+\toprule
+Medida & Valor \\
+\midrule
+Scores produzidos & 284.807 \\
+Fraudes rotuladas & 492 \\
+Alertas & 562 \\
+Verdadeiros positivos & 435 \\
+Falsos positivos & 127 \\
+Falsos negativos & 57 \\
+Precision retrospectiva & 0,7731 \\
+Recall retrospectivo & 0,8841 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{center}
+\fbox{\parbox{0.92\columnwidth}{\centering \textbf{[Figura 3 -- inserir manualmente]}\\ Distribuicao de \texttt{fraud\_score} e linha vertical no limiar 0,70; opcionalmente sobrepor fraudes reais e alertas.}}
+\end{center}
+
+\subsection{Desempenho da pipeline e qualidade}
+
+A execucao confirma que a arquitetura suporta o fluxo completo no ambiente local. A publicacao Kafka levou 164,6 s e o experimento, que inclui dez ajustes de validacao mais o modelo de implantacao, levou 1.224,8 s (aproximadamente 20,4 min). O scoring batch final levou 74,0 s. Esses numeros sao observacoes do ambiente de teste, e nao afirmacoes de throughput universal: ha apenas um worker, dois cores e 3 GB de memoria. Ainda assim, o fato de todo o conjunto atravessar Kafka, Iceberg e Spark sem perda fornece evidencia de integracao funcional.
+
+As 151 metricas de qualidade incluem contagens, completude e distribuicoes por tabela. A igualdade das contagens entre Bronze, Silver e Gold scores e uma verificacao simples e forte para esta execucao. Em producao, esse conjunto deveria ser complementado por alertas de deriva de distribuicao, atraso de label, mudanca de precision estimada e SLA por micro-batch. A estrutura Iceberg permite que essas verificacoes sejam escritas como tabelas, em vez de logs efemeros.
+
+\section{Conclusions}
+
+Este trabalho desenvolveu e executou uma arquitetura lakehouse local para deteccao de fraude em cartoes. A pipeline integrou Kafka para eventos, Spark Structured Streaming para Bronze e inferencia, HDFS e Iceberg para persistencia de camadas, Hive Metastore para catalogo, Airflow para orquestracao e Spark MLlib para treinamento. O experimento ULB percorreu todas as 284.807 transacoes, gerou 284.807 scores, 562 alertas, KPIs, exportacoes CSV e 151 metricas de qualidade.
+
+Do ponto de vista metodologico, a principal decisao foi substituir uma divisao aleatoria simples por protocolo temporal 60/20/20, com validacao separada, teste isolado e cinco sementes. O candidato compacto foi selecionado por PR-AUC de validacao e obteve PR-AUC medio de 0,749825 e precision media de 0,861579 no teste. Os valores mostram que o modelo identifica uma parcela relevante das fraudes mantendo uma fila de alertas relativamente precisa, mas tambem deixam claro que ainda ha falsos negativos e que a escolha do limiar depende do custo real de revisao e perda.
+
+Ha limitacoes importantes. O ULB e historico, tem features anonimizadas por PCA e representa somente dois dias; logo, nao demonstra deriva de conceito, disponibilidade tardia de labels ou comportamento de clientes em longo prazo. O experimento utiliza um unico worker local e nao mede escalabilidade horizontal, latencia ponta a ponta por evento ou disponibilidade sob falha. A grade de hiperparametros foi pequena, os modelos nao incluem variaveis de grafo ou contexto de entidade e o ensemble por media nao substitui uma analise de custo monetario. Tambem nao foi realizado teste estatistico de diferenca entre configuracoes, pois os cinco runs compartilham os mesmos blocos temporais.
+
+Como trabalhos futuros, propoe-se avaliar janelas temporais deslizantes e prequential, incorporar custos por transacao e limites de capacidade de revisao, comparar diferentes politicas de recalibracao, medir throughput com multiplos workers e adicionar monitoramento de deriva. A extensao com atributos de conta, comerciante e dispositivo permitiria investigar modelos relacionais, desde que preservada a separacao entre avaliacao e dados futuros. O estudo pode ser reproduzido pelo codigo no GitHub em \url{https://github.com/rafaellucian0/fraud_detection-big_data}, que inclui Docker Compose, configuracoes, jobs Spark, DAGs Airflow, testes e instrucoes para posicionar o dataset ULB.
+
+\section{References}
+\begin{thebibliography}{99}
+
+\bibitem{akidau2015}
+Akidau, T.; Chernyak, S.; Lax, R.; et al. (2015). The Dataflow Model: A Practical Approach to Balancing Correctness, Latency, and Cost in Massive-Scale, Unbounded, Out-of-Order Data Processing. \textit{Proceedings of the VLDB Endowment}, 8(12), 1792--1803.
+
+\bibitem{adlermann2024}
+Adlermann, J. F. (2024). A GRA-Enhanced Cloud AI Framework for Petabyte-Scale Multi-Tenant Environments: Multivariate Classification for Credit Card Fraud Detection and Adaptive Risk Analytics. \textit{International Journal of Engineering \& Extended Technologies Research}, 6(6).
+
+\bibitem{allam2024}
+Allam, K. (2024). Cloud-Based Data Hubs and SQL Pipelines for Real-Time Financial Analytics. \textit{International Journal of Emerging Trends in Computer Science and Information Technology}, 5(4), 94--104.
+
+\bibitem{armbrust2021}
+Armbrust, M.; Ghodsi, A.; Xin, R.; Zaharia, M. (2021). Lakehouse: A New Generation of Open Platforms that Unify Data Warehousing and Advanced Analytics. \textit{Proceedings of CIDR 2021}.
+
+\bibitem{battapothu2025}
+Battapothu, V. (2025). Lakehouse-Powered Payment Risk at Scale. \textit{Manuscrito tecnico independente}.
+
+\bibitem{bfsilakehouse2023}
+Oliveira, M.; Iyer, R. (2023). Migrating BFSI Data Workloads to Cloud-Native Environments: A Case Study on Multi-Tier Data Lakehouse Architectures with AWS Redshift, Athena, and Intelligent Orchestration for Compliance. \textit{Journal of Engineering, Mechanics and Modern Architecture}, 2(11), 50--61.
+
+\bibitem{carrington2025}
+Carrington, N. L. (2025). AI-Enabled Cloud Lakehouse for Large-Scale Data Warehousing: SAP Integration for Secure Analytics and Tableau-Driven Reporting. \textit{International Journal of Research and Applied Innovations}, 8(5).
+
+\bibitem{dalpozzolo2015}
+Dal Pozzolo, A.; Caelen, O.; Le Borgne, Y.-A.; Waterschoot, S.; Bontempi, G. (2015). Calibrating Probability with Undersampling for Unbalanced Classification. \textit{IEEE Symposium Series on Computational Intelligence}, 159--166.
+
+\bibitem{dalpozzolo2018}
+Dal Pozzolo, A.; Caelen, O.; Johnson, R. A.; Bontempi, G. (2018). Credit Card Fraud Detection: A Realistic Modeling and a Novel Learning Strategy. \textit{IEEE Transactions on Neural Networks and Learning Systems}, 29(8), 3784--3797.
+
+\bibitem{davis2006}
+Davis, J.; Goadrich, M. (2006). The Relationship Between Precision-Recall and ROC Curves. \textit{Proceedings of the 23rd International Conference on Machine Learning}, 233--240.
+
+\bibitem{hand2009}
+Hand, D. J. (2009). Measuring Classifier Performance: A Coherent Alternative to the Area Under the ROC Curve. \textit{Machine Learning}, 77, 103--123.
+
+\bibitem{kreps2011}
+Kreps, J.; Narkhede, N.; Rao, J. (2011). Kafka: A Distributed Messaging System for Log Processing. \textit{Proceedings of NetDB}, 1--7.
+
+\bibitem{ngai2011}
+Ngai, E. W. T.; Hu, Y.; Wong, Y. H.; Chen, Y.; Sun, X. (2011). The Application of Data Mining Techniques in Financial Fraud Detection: A Classification Framework and an Academic Review of Literature. \textit{Decision Support Systems}, 50(3), 559--569.
+
+\bibitem{saito2015}
+Saito, T.; Rehmsmeier, M. (2015). The Precision-Recall Plot Is More Informative than the ROC Plot When Evaluating Binary Classifiers on Imbalanced Datasets. \textit{PLOS ONE}, 10(3), e0118432.
+
+\bibitem{ulb2013}
+Worldline and Machine Learning Group, Universite Libre de Bruxelles. (2013). Credit Card Fraud Detection Dataset. \textit{Kaggle Dataset: mlg-ulb/creditcardfraud}.
+
+\bibitem{zaharia2016}
+Zaharia, M.; Xin, R. S.; Wendell, P.; et al. (2016). Apache Spark: A Unified Engine for Big Data Processing. \textit{Communications of the ACM}, 59(11), 56--65.
+
+\end{thebibliography}
+\end{document}

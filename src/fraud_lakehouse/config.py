@@ -30,6 +30,10 @@ def load_threshold_config() -> dict[str, Any]:
     return load_yaml(CONFIG_DIR / "thresholds.yaml")
 
 
+def load_experiment_config() -> dict[str, Any]:
+    return load_yaml(CONFIG_DIR / "experiment.yaml")
+
+
 def require_dataset(path: str | Path) -> Path:
     dataset_path = Path(path)
     if not dataset_path.exists():
@@ -39,4 +43,3 @@ def require_dataset(path: str | Path) -> Path:
     if dataset_path.name.lower() != "creditcard.csv":
         raise ValueError("Expected the ULB dataset file to be named creditcard.csv.")
     return dataset_path
-

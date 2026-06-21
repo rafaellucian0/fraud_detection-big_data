@@ -75,10 +75,44 @@ CREATE TABLE IF NOT EXISTS local.gold.data_quality_metrics (
   created_at STRING
 ) USING iceberg;
 
+CREATE TABLE IF NOT EXISTS local.gold.experiment_metrics (
+  experiment_id STRING,
+  candidate_id STRING,
+  run_id INT,
+  seed INT,
+  split_name STRING,
+  threshold DOUBLE,
+  precision DOUBLE,
+  recall DOUBLE,
+  f1_score DOUBLE,
+  auc_pr DOUBLE,
+  roc_auc DOUBLE,
+  tp BIGINT,
+  fp BIGINT,
+  tn BIGINT,
+  fn BIGINT,
+  train_rows BIGINT,
+  validation_rows BIGINT,
+  test_rows BIGINT,
+  selected_candidate BOOLEAN,
+  created_at STRING
+) USING iceberg;
+
+CREATE TABLE IF NOT EXISTS local.gold.experiment_summary (
+  experiment_id STRING,
+  candidate_id STRING,
+  metric_name STRING,
+  split_name STRING,
+  mean_value DOUBLE,
+  sample_stdev DOUBLE,
+  runs INT,
+  selected_candidate BOOLEAN,
+  created_at STRING
+) USING iceberg;
+
 CREATE TABLE IF NOT EXISTS local.ml.model_metrics (
   model_version STRING,
   metric_name STRING,
   metric_value DOUBLE,
   created_at STRING
 ) USING iceberg;
-

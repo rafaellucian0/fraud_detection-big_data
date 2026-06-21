@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import sqrt
 
 
 @dataclass(frozen=True)
@@ -72,3 +73,13 @@ def transaction_id_from_values(*values: object) -> str:
     raw = "|".join("" if value is None else str(value) for value in values)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+
+def mean_and_sample_stdev(values: list[float]) -> tuple[float, float]:
+    """Return arithmetic mean and sample standard deviation for reported runs."""
+    if not values:
+        raise ValueError("At least one value is required.")
+    mean = sum(values) / len(values)
+    if len(values) == 1:
+        return mean, 0.0
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return mean, sqrt(variance)

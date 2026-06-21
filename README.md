@@ -225,6 +225,29 @@ Não são usados:
 - Delta Lake
 - Hudi
 
+## Protocolo Experimental
+
+O comando `make experiment` executa uma avaliacao temporal reproduzivel configurada em `configs/app/experiment.yaml`:
+
+- separacao cronologica 60% treino, 20% validacao e 20% teste pela coluna `Time`;
+- duas configuracoes de ensemble RF + GBT do Spark MLlib;
+- cinco sementes por configuracao;
+- selecao por PR-AUC medio de validacao;
+- tuning de threshold apenas na validacao;
+- teste final isolado, com media e desvio-padrao registrados no Gold.
+
+Para reproduzir a execucao integral do ULB, use `make ingest-full` com o Bronze stream ativo, depois execute:
+
+```bash
+make silver
+make experiment
+make score-batch
+make gold
+make quality
+```
+
+Os resultados do experimento ficam em `local.gold.experiment_metrics` e `local.gold.experiment_summary`. O artigo com a metodologia e os resultados da execucao integral esta em `docs/article/fraud_lakehouse_article.tex` e `docs/article/fraud_lakehouse_article.pdf`.
+
 ## Airflow
 
 As DAGs em `dags/` disparam os mesmos jobs Spark do fluxo manual. Elas usam `docker exec` para executar comandos dentro do container `fraud-spark-master`.

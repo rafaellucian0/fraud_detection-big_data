@@ -2,7 +2,7 @@ COMPOSE := docker compose
 PYTHONPATH := /opt/project/src:/opt/project
 SPARK_SUBMIT := $(COMPOSE) exec -e PYTHONPATH=$(PYTHONPATH) spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077
 
-.PHONY: build up down restart logs ps init create-topics validate-dataset ingest-sample bronze-stream silver train score-stream gold quality test test-docker clean
+.PHONY: build up down restart logs ps init create-topics validate-dataset ingest-sample ingest-full bronze-stream silver train experiment score-stream score-batch gold quality test test-docker clean
 
 build:
 	$(COMPOSE) build
@@ -34,6 +34,9 @@ validate-dataset:
 ingest-sample:
 	$(COMPOSE) exec spark-master python3 /opt/project/jobs/ingestion/produce_transactions.py --input /opt/project/data/input/creditcard.csv --bootstrap-servers kafka:9092 --topic transactions.raw --batch-size 100 --sleep-seconds 1 --max-records 1000
 
+ingest-full:
+	$(COMPOSE) exec spark-master python3 /opt/project/jobs/ingestion/produce_transactions.py --input /opt/project/data/input/creditcard.csv --bootstrap-servers kafka:9092 --topic transactions.raw --batch-size 1000
+
 bronze-stream:
 	$(SPARK_SUBMIT) --conf spark.executorEnv.PYTHONPATH=$(PYTHONPATH) --conf spark.driverEnv.PYTHONPATH=$(PYTHONPATH) /opt/project/jobs/streaming/kafka_to_bronze.py
 
@@ -43,8 +46,13 @@ silver:
 train:
 	$(SPARK_SUBMIT) --conf spark.executorEnv.PYTHONPATH=$(PYTHONPATH) --conf spark.driverEnv.PYTHONPATH=$(PYTHONPATH) /opt/project/jobs/training/train_fraud_model.py
 
+experiment: train
+
 score-stream:
 	$(SPARK_SUBMIT) --conf spark.executorEnv.PYTHONPATH=$(PYTHONPATH) --conf spark.driverEnv.PYTHONPATH=$(PYTHONPATH) /opt/project/jobs/streaming/score_transactions.py
+
+score-batch:
+	$(SPARK_SUBMIT) --conf spark.executorEnv.PYTHONPATH=$(PYTHONPATH) --conf spark.driverEnv.PYTHONPATH=$(PYTHONPATH) /opt/project/jobs/scoring/score_silver_batch.py
 
 gold:
 	$(SPARK_SUBMIT) --conf spark.executorEnv.PYTHONPATH=$(PYTHONPATH) --conf spark.driverEnv.PYTHONPATH=$(PYTHONPATH) /opt/project/jobs/gold/build_gold_aggregations.py
