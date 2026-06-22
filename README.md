@@ -246,7 +246,7 @@ make gold
 make quality
 ```
 
-Os resultados do experimento ficam em `local.gold.experiment_metrics` e `local.gold.experiment_summary`. O artigo com a metodologia e os resultados da execucao integral esta em `docs/article/fraud_lakehouse_article.tex` e `docs/article/fraud_lakehouse_article.pdf`.
+Os resultados do experimento ficam em `local.gold.experiment_metrics` e `local.gold.experiment_summary`.
 
 ## Airflow
 

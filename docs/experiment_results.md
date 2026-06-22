@@ -41,5 +41,3 @@ O modelo de implantacao foi ajustado em treino mais validacao e aplicado retrosp
 - Falsos negativos: 57.
 - Precision retrospectiva: 0,7731.
 - Recall retrospectivo: 0,8841.
-
-O artigo correspondente esta em `docs/article/fraud_lakehouse_article.tex` e `docs/article/fraud_lakehouse_article.pdf`.
